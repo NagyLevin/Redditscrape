@@ -8,6 +8,7 @@ import praw
 from praw.models import Submission
 from dotenv import load_dotenv
 from tqdm import tqdm
+from prawcore import Redirect, NotFound, Forbidden
 
 
 """
@@ -38,6 +39,39 @@ CMT_FIELDS = [
 Helping Functions
 - Small utilities for parsing dates, filesystem safety, and (ND)JSON append.
 """
+
+
+
+def resolve_subreddit(reddit: praw.Reddit, name: str):
+
+    """
+    Checks if the subbreddit exists and also normalizes names
+    Return a PRAW Subreddit or None if not accessible/doesn't exist.
+    
+    """
+    name = name.strip()
+    if not name:
+        return None
+    if name.startswith("r/"):
+        name = name[2:]
+    sr = reddit.subreddit(name)
+    try:
+        # Force a fetch to validate existence & access
+        sr._fetch()
+        # Optionally warn about quarantined subs (app-only auth nem fog opt-inelni)
+        if getattr(sr, "quarantine", False):
+            print(f"[skip] r/{name} is quarantined (requires opt-in, skip with app-only auth).")
+            return None
+        return sr
+    except Redirect:
+        print(f"[skip] r/{name} not found (redirected to search).")
+    except NotFound:
+        print(f"[skip] r/{name} not found/banned.")
+    except Forbidden:
+        print(f"[skip] r/{name} is private or quarantined (403).")
+    except Exception as e:
+        print(f"[skip] r/{name} unknown error: {e!r}")
+    return None
 
 """
 loads subbreddit names from file
@@ -282,6 +316,9 @@ def download_submissions_and_comments(
     plain: bool = False,  # new param: enable TXT mode instead of json
 ):
     sr = reddit.subreddit(subreddit_name)
+    
+    if sr is None:
+        return
 
     ensure_dir(out_dir)
     sub_path = os.path.join(out_dir, f"{subreddit_name}.submissions.ndjson")
@@ -376,6 +413,10 @@ def download_submissions_and_comments(
             if comments_buf:
                 ndjson_append(cmt_path, comments_buf)
 
+    except (Redirect, NotFound, Forbidden) as e:
+        print(f" skipping because we subbredit is private or no longer exists {e.__class__.__name__} downloaded:")
+        return
+    
     finally:
         if txt_file:
             txt_file.flush()
