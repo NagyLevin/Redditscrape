@@ -39,6 +39,35 @@ Helping Functions
 - Small utilities for parsing dates, filesystem safety, and (ND)JSON append.
 """
 
+"""
+loads subbreddit names from file
+"""
+
+def load_subreddits_from_file(path: str) -> list[str]:
+    """
+    Read subreddits from a text file, one per line.
+    - Ignores empty lines and lines starting with '#'
+    - Strips whitespace
+    - Accepts optional leading 'r/' and removes it
+    - De-duplicates while preserving order
+    """
+    seen = set()
+    subs: list[str] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.lower().startswith("r/"):
+                line = line[2:]
+            # keep only simple subreddit token (no spaces)
+            line = line.split()[0]
+            if line and line not in seen:
+                seen.add(line)
+                subs.append(line)
+    if not subs:
+        raise RuntimeError(f"No subreddits found in file: {path}")
+    return subs
 
 """
 Checks if date time is valid
@@ -372,7 +401,8 @@ def main():
     ap.add_argument("--no-comments", action="store_true", help="skip comments")
     ap.add_argument("--sleep", type=float, default=0.5, help="sleep between posts (seconds)")
     ap.add_argument("--auth-test", action="store_true", help="only test authentication and exit")
-    ap.add_argument("--plain", action="store_true", help="TXT output (one big file per subreddit)")  # new
+    ap.add_argument("--plain", action="store_true", help="TXT output (one big file per subreddit)")
+    ap.add_argument("--inputfile", help="path to a text file listing subreddits (one per line)", default=None)
 
     args = ap.parse_args()
     after = to_epoch(args.after)
@@ -384,7 +414,18 @@ def main():
         print("[auth] smoke test successful – exiting (--auth-test)")
         return
 
-    subreddits = args.subreddit if args.subreddit else DEFAULT_SUBREDDITS
+    #If there is an imput file we will read the subreddit names from there.
+
+    if args.inputfile:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        inpath = args.inputfile
+        if not os.path.isabs(inpath):
+            inpath = os.path.join(base_dir, inpath)
+        subreddits = load_subreddits_from_file(inpath)
+        print(f"[info] Loaded {len(subreddits)} subreddits from {inpath}")
+    else:
+        subreddits = args.subreddit if args.subreddit else DEFAULT_SUBREDDITS
+
     outdir = args.out if args.out else DEFAULT_OUTDIR
 
     for sr in subreddits:
@@ -399,6 +440,7 @@ def main():
             include_comments=(not args.no_comments),
             plain=args.plain,  # pass through TXT mode
         )
+
 
 if __name__ == "__main__":
     main()
