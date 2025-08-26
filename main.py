@@ -16,8 +16,8 @@ Default values if the user gives none
 - Fallback subreddit list and output directory used by the CLI when no args are provided.
 """
 
-DEFAULT_SUBREDDITS = ["hikingHungary", "RealHungary"]  # can be more
-DEFAULT_OUTDIR = "./reddit_dump"                       # base output directory
+DEFAULT_SUBREDDITS = ["hikingHungary", "RealHungary"]  # add more here if you want
+DEFAULT_OUTDIR = "/home/szabol/SavedFromReddit"                       # base output directory
 VISITED_FILE      = pathlib.Path("./visited.txt") #this is where it puts the names of the files that it worked on
 
 """
@@ -335,9 +335,10 @@ def download_submissions_and_comments(
     include_comments: bool = True,
     plain: bool = False,  # new param: enable TXT mode instead of json
 ):
-    sr = reddit.subreddit(subreddit_name)
-    
+    sr = resolve_subreddit(reddit, subreddit_name)
+
     if sr is None:
+        
         return
 
     ensure_dir(out_dir)
@@ -471,6 +472,8 @@ def main():
 
     # Auth check (optional flag)
     reddit = init_reddit()
+
+
     if args.auth_test:
         print("[auth] smoke test successful – exiting (--auth-test)")
         return
