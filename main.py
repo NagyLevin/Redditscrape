@@ -9,7 +9,7 @@ from praw.models import Submission
 from dotenv import load_dotenv
 from tqdm import tqdm
 from prawcore import Redirect, NotFound, Forbidden
-
+import pathlib
 
 """
 Default values if the user gives none
@@ -18,7 +18,7 @@ Default values if the user gives none
 
 DEFAULT_SUBREDDITS = ["hikingHungary", "RealHungary"]  # can be more
 DEFAULT_OUTDIR = "./reddit_dump"                       # base output directory
-
+VISITED_FILE      = pathlib.Path("./visited.txt") #this is where it puts the names of the files that it worked on
 
 """
 Fields used
@@ -39,15 +39,35 @@ CMT_FIELDS = [
 Helping Functions
 - Small utilities for parsing dates, filesystem safety, and (ND)JSON append.
 """
+def add_to_visited(name: str) -> None:
+    VISITED_FILE.touch(exist_ok=True)
+    cur = set(x.strip() for x in VISITED_FILE.read_text(encoding="utf-8").splitlines() if x.strip())
+    if name not in cur:
+        with VISITED_FILE.open("a", encoding="utf-8") as f:
+            f.write(name + "\n")
+def is_visited(name: str) -> bool:
+    """
+    Checks if the file name is in the visited section, so that it only works on every file once
+    """
+    VISITED_FILE.touch(exist_ok=True)
+    return name in {x.strip() for x in VISITED_FILE.read_text(encoding="utf-8").splitlines() if x.strip()}
 
-
+def add_to_timeouts(name: str) -> None:
+    """
+    If the file prcessing is halted, its name will get added to timeouts
+    """
+    TIMEOUTS_FILE.touch(exist_ok=True)
+    cur = set(
+        x.strip() for x in TIMEOUTS_FILE.read_text(encoding="utf-8").splitlines() if x.strip()
+    )
+    if name not in cur:
+        with TIMEOUTS_FILE.open("a", encoding="utf-8") as f:
+            f.write(name + "\n")
 
 def resolve_subreddit(reddit: praw.Reddit, name: str):
-
     """
     Checks if the subbreddit exists and also normalizes names
     Return a PRAW Subreddit or None if not accessible/doesn't exist.
-    
     """
     name = name.strip()
     if not name:
@@ -142,7 +162,7 @@ Append a list of dicts to an NDJSON file
 """
 def ndjson_append(path: str, items):
     ensure_dir(os.path.dirname(path) or ".")
-    with open(path, "a", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for it in items:
             f.write(json.dumps(it, ensure_ascii=False) + "\n")
 
@@ -337,7 +357,7 @@ def download_submissions_and_comments(
     comments_buf = []
 
     # Plain mode: open TXT once and append each post immediately
-    txt_file = open(txt_path, "a", encoding="utf-8") if plain else None
+    txt_file = open(txt_path, "w", encoding="utf-8") if plain else None
     if txt_file and os.path.getsize(txt_path) == 0:
         txt_file.write(f"=== r/{subreddit_name} ===\n\n")
 
@@ -470,6 +490,11 @@ def main():
     outdir = args.out if args.out else DEFAULT_OUTDIR
 
     for sr in subreddits:
+        
+        if is_visited(sr):
+            print(f"Already processed {sr}")
+            continue
+        
         download_submissions_and_comments(
             reddit=reddit,
             subreddit_name=sr,
@@ -481,6 +506,7 @@ def main():
             include_comments=(not args.no_comments),
             plain=args.plain,  # pass through TXT mode
         )
+        add_to_visited(sr)
 
 
 if __name__ == "__main__":
