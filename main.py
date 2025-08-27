@@ -17,7 +17,7 @@ Default values if the user gives none
 """
 
 DEFAULT_SUBREDDITS = ["hikingHungary", "RealHungary"]  # add more here if you want
-DEFAULT_OUTDIR = "/home/szabol/SavedFromReddit"                       # base output directory
+DEFAULT_OUTDIR = "/mnt/c/Users/Levinwork/Documents/Nytud/2feladat/Redditscrape/reddit_dump"                       # base output directory
 VISITED_FILE      = pathlib.Path("./visited.txt") #this is where it puts the names of the files that it worked on
 
 """
