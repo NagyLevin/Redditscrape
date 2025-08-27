@@ -320,7 +320,7 @@ def iter_new_until(subreddit, before: Optional[int], after: Optional[int], hard_
 """
 Download submissions + optional comments for one subreddit
 - Supports NDJSON output (submissions/comments) or a single human-readable TXT file ("plain" mode).
-- Applies time window (after/before), post count limit, and polite sleep between requests.
+- Applies time window (after/before), post count limit, and sleep between requests.
 - Buffers NDJSON writes for efficiency; 
 - writes TXT progressively in plain mode.
 """

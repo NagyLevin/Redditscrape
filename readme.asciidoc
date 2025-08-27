@@ -1,0 +1,178 @@
+= Reddit Subreddit Downloader: `main.py`
+Levin
+:toc:
+
+== Cél és összefoglaló
+Ez a script (`main.py`) Reddit szubredditek *posztjainak és kommentjeinek* letöltését automatizálja a Reddit PRAW kliensen keresztül.
+Támogat időablakot (`--after/--before`), posztlimitet (`--limit`), kommentek opcionális letöltését, valamint kétféle kimenetet:
+*NDJSON* (külön *submissions* és *comments*) vagy egyetlen, olvasóbarát *TXT* fájl szubredditenként (`--plain`).
+A `visited.txt` dokumentálja a már felkeresett subredditeket.
+
+*Fontos:* a program **csak akkor hoz létre kimeneti fájlokat**, ha a megadott szubreddit *létezik és elérhető*. A nem létező vagy privát subokat kihagyja, és nem ír ki üres fájlt.
+
+== Fő funkciók
+
+* **Subreddit-ellenőrzés és normalizálás:** `resolve_subreddit()` `_fetch` hívással validálja a szubreddit létét.
+* **Kimeneti módok:**
+** *NDJSON*: `r/<name>.submissions.ndjson` és `r/<name>.comments.ndjson` (egy sor = 1 JSON objektum, pufferelt írás).
+** *Plain TXT*: jól olvasható blokkos szöveg egyetlen `r/<name>.txt` fájlban (`--plain`).
+* **Időablak:** `--after/--before` (epoch vagy ISO-8601), a *new* feedet csökkenő időrendben járja be (`iter_new_until()`).
+* **Kommentek letöltése:** `--no-comments` kapcsolóval kikapcsolható; különben `replace_more(limit=None)` és laposított lista.
+* **API-kímélet:** `--sleep` (alap: 0.5 s) minden poszt után.
+* **TXT formázás:** `_safe_text()` megőrzi a sortöréseket, a további sorokat beljebb húzza; `txt_write_post_block()` emberbarát struktúra.
+
+== Hitelesítés (auth)
+
+Az init *app-only* (client_credentials) módban próbálkozik, siker esetén: `[auth] OK: app-only (client_credentials)`.
+
+Környezeti változók (a `.env`-ből töltve):
+
+[cols="1,2,3",options="header"]
+|===
+|Név | Kötelező | Megjegyzés
+
+|`REDDIT_CLIENT_ID` | igen | Reddit app azonosító
+|`REDDIT_CLIENT_SECRET` | igen | Reddit app secret
+|`REDDIT_USER_AGENT` | igen | Pl. `mytool/1.0 by u/YourUser`
+|===
+
+== Alapértelmezések és állományok
+
+[cols="1,3,3",options="header"]
+|===
+|Név | Alapérték | Jelentés
+
+|`DEFAULT_SUBREDDITS` | `["hikingHungary", "RealHungary"]` | CLI nélkül ezek futnak csak placeholderek.
+|`DEFAULT_OUTDIR` | `/home/szabol/SavedFromReddit` | Kimeneti könyvtár gyökere.
+|`VISITED_FILE` | `./visited.txt` | Feldolgozott szubreddit-nevek listája.
+|`TIMEOUTS_FILE` | — | A kódban hivatkozott (`add_to_timeouts()`), de nincs deklarálva/használva lehetőség jövőbeli használatra
+|===
+
+== Bemenet: szubredditek fájlból
+
+`load_subreddits_from_file(path)` soronként olvas neveket (üres sorok, `#`-kommentek kihagyva; `r/` előtag opcionális, duplikátumok szűrve). Üres lista esetén hiba.
+
+== Időkezelés
+
+`to_epoch(dt)` elfogad: `None`, epoch stringet vagy ISO-8601-et (`YYYY-MM-DD` vagy `YYYY-MM-DDTHH:MM:SS`). Visszatérés: epoch (UTC) vagy `None`.
+
+== Kimeneti formátumok
+
+=== NDJSON mód (alap)
+Két fájl szubredditenként:
+* `<outdir>/<subreddit>.submissions.ndjson`
+* `<outdir>/<subreddit>.comments.ndjson`
+
+Mindkettő NDJSON (soronként 1 JSON). Pufferelt írás: posztoknál 50 elem, kommenteknél 200 elem után flush.
+
+**Submissions mezők (whitelist):**
+`id, title, author, subreddit, created_utc, selftext, url, permalink, num_comments, score, over_18, spoiler, locked, stickied`
+
+**Comments mezők (whitelist):**
+`id, author, subreddit, created_utc, body, score, parent_id, link_id, permalink, is_submitter`
+
+=== Plain TXT mód (`--plain`)
+Egyetlen `<outdir>/<subreddit>.txt`, blokkos szerkezetben:
+
+----
+
+=== r/PÉLDA ===
+
+Post:
+by alice: Cím
+  body:
+    Első sor…
+    Második sor…
+  comment:
+    bob: Szia!
+  comment:
+    [deleted]: …
+----
+
+== CLI paraméterek
+
+[cols="1,1,3,5",options="header"]
+|===
+|Kapcsoló | Típus | Alapérték | Leírás
+
+|`subreddit` | poz. arg | — | Egy vagy több név: `RealHungary hikingHungary`. Ha nincs → `DEFAULT_SUBREDDITS`.
+|`--out` | str | `DEFAULT_OUTDIR` | Kimeneti gyökérkönyvtár.
+|`--after` | str | None | Alsó időkorlát (epoch vagy ISO `YYYY-MM-DD[THH:MM:SS]`, UTC).
+|`--before` | str | None | Felső időkorlát (mint fenti példa).
+|`--limit` | int | None | Posztok max. száma (pl top 50 esetén 50 et lehet Írni).
+|`--no-comments` | flag | False | Kommentek lekérésének tiltása.
+|`--sleep` | float | 0.5 | Szünet posztok között (másodperc).
+|`--plain` | flag | False | TXT mód NDJSON helyett.
+|`--inputfile` | str | None | Szubredditek listája fájlból (soronként; `r/` megengedett; duplikátum-szűrés).
+|===
+
+== Telepítés és futtatás
+
+. **Python környezet (ajánlott venv):**
++
+----
+python -m venv .venv
+source .venv/bin/activate
+pip install praw python-dotenv tqdm
+# vagy: pip install -r requirements.txt
+----
+
+. **`.env` a `main.py` mellett: (Kell a futáshoz)**
++
+----
+REDDIT_CLIENT_ID=xxxxxxxx
+REDDIT_CLIENT_SECRET=yyyyyyyy
+REDDIT_USER_AGENT=mytool/1.0 by u/YourUser
+----
+
+. **Gyors próba:**
++
+----
+python3 main.py RealHungary --plain --out /te/saját/könyvtárad
+----
+
+== Példák
+
+=== NDJSON letöltés két szubredditről
+----
+python3 main.py RealHungary hikingHungary --out /te/saját/könyvtárad
+----
+
+=== TXT kimenet, 100 posztig, kommentek nélkül
+----
+python3 main.py budapest --plain --limit 100 --no-comments
+----
+
+=== Időablak: 2024-01-01 – 2024-03-31 (UTC)
+----
+python3 main.py hungary --after 2024-01-01 --before 2024-03-31
+----
+
+=== Szubredditek fájlból (duplikátumok kiszűrve)
+`subs.txt`:
+----
+# magyar városok
+r/budapest
+Debrecen
+szeged
+----
+Futtatás:
+----
+python3 main.py --inputfile subs.txt --plain
+----
+
+== Kimeneti struktúra (példa)
+
+
+== Hibaelhárítás
+
+[cols="2,5",options="header"]
+|===
+|Tünet | Teendő
+
+|`Authentication error` | Ellenőrizd a `.env`-et; van-e `REDDIT_CLIENT_ID/SECRET/USER_AGENT`. A USERNAME/PASSWORD itt nem szükséges.
+|Üres kimenet | Lehet, hogy a szubreddit létezik de üres
+|429 / rate limit | Növeld a `--sleep` értékét (pl. 1.5–2.0)
+|Unicode gond TXT-ben | A fájlok UTF-8-ban íródnak; a megjelenítést állítsd UTF-8-ra.
+|===
+
