@@ -17,7 +17,7 @@ Default values if the user gives none
 """
 
 DEFAULT_SUBREDDITS = ["hikingHungary", "RealHungary"]  # add more here if you want
-DEFAULT_OUTDIR = "/mnt/c/Users/Levinwork/Documents/Nytud/2feladat/Redditscrape/reddit_dump"                       # base output directory
+DEFAULT_OUTDIR = "/home/szabol/SavedFromReddit_2"                       # base output directory
 VISITED_FILE      = pathlib.Path("./visited.txt") #this is where it puts the names of the files that it worked on
 
 """
@@ -498,18 +498,27 @@ def main():
             print(f"Already processed {sr}")
             continue
         
-        download_submissions_and_comments(
-            reddit=reddit,
-            subreddit_name=sr,
-            out_dir=outdir,
-            after=after,
-            before=before,
-            limit_posts=args.limit,
-            sleep_s=args.sleep,
-            include_comments=(not args.no_comments),
-            plain=args.plain,  # pass through TXT mode
-        )
-        add_to_visited(sr)
+        try:
+            download_submissions_and_comments(
+                reddit=reddit,
+                subreddit_name=sr,
+                out_dir=outdir,
+                after=after,
+                before=before,
+                limit_posts=args.limit,
+                sleep_s=args.sleep,
+                include_comments=(not args.no_comments),
+                plain=args.plain,  # pass through TXT mode
+            )
+            add_to_visited(sr)
+        except Exception as e:
+            # abort this file, do NOT mark visited, DO add to timeouts
+        
+            print(f"[ABORT FILE] {sr} due to failure: {e}")
+            add_to_timeouts(sr)
+            # move on to next file
+            continue
+
 
 
 if __name__ == "__main__":

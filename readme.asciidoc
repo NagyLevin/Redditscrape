@@ -2,6 +2,25 @@
 Levin
 :toc:
 
+== Telepítés és futtatás
+
+. **Python környezet (ajánlott venv):**
++
+----
+python -m venv .venv
+source .venv/bin/activate
+pip install praw python-dotenv tqdm
+# vagy: pip install -r requirements.txt
+----
+
+. **`.env` a `main.py` mellett: (Kell a futáshoz)**
++
+----
+REDDIT_CLIENT_ID=xxxxxxxx
+REDDIT_CLIENT_SECRET=yyyyyyyy
+REDDIT_USER_AGENT=mytool/1.0 by u/YourUser
+----
+
 == Cél és összefoglaló
 Ez a script (`main.py`) Reddit szubredditek *posztjainak és kommentjeinek* letöltését automatizálja a Reddit PRAW kliensen keresztül.
 Támogat időablakot (`--after/--before`), posztlimitet (`--limit`), kommentek opcionális letöltését, valamint kétféle kimenetet:
@@ -106,24 +125,7 @@ by alice: Cím
 |`--inputfile` | str | None | Szubredditek listája fájlból (soronként; `r/` megengedett; duplikátum-szűrés).
 |===
 
-== Telepítés és futtatás
 
-. **Python környezet (ajánlott venv):**
-+
-----
-python -m venv .venv
-source .venv/bin/activate
-pip install praw python-dotenv tqdm
-# vagy: pip install -r requirements.txt
-----
-
-. **`.env` a `main.py` mellett: (Kell a futáshoz)**
-+
-----
-REDDIT_CLIENT_ID=xxxxxxxx
-REDDIT_CLIENT_SECRET=yyyyyyyy
-REDDIT_USER_AGENT=mytool/1.0 by u/YourUser
-----
 
 . **Gyors próba:**
 +
