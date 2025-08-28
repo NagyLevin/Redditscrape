@@ -19,6 +19,7 @@ Default values if the user gives none
 DEFAULT_SUBREDDITS = ["hikingHungary", "RealHungary"]  # add more here if you want
 DEFAULT_OUTDIR = "/home/szabol/SavedFromReddit_2"                       # base output directory
 VISITED_FILE      = pathlib.Path("./visited.txt") #this is where it puts the names of the files that it worked on
+TIMEOUTS_FILE = pathlib.Path("./timeouts.txt")  # names of aborted files (relative keys)
 
 """
 Fields used
@@ -511,6 +512,8 @@ def main():
                 plain=args.plain,  # pass through TXT mode
             )
             add_to_visited(sr)
+
+            
         except Exception as e:
             # abort this file, do NOT mark visited, DO add to timeouts
         
