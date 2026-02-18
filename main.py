@@ -2,14 +2,16 @@ import os
 import time
 import json
 import argparse
+import re
+import pathlib
 from datetime import datetime, timezone
 from typing import Optional, Iterable
+
 import praw
 from praw.models import Submission
 from dotenv import load_dotenv
 from tqdm import tqdm
 from prawcore import Redirect, NotFound, Forbidden
-import pathlib
 
 """
 Default values if the user gives none
@@ -17,9 +19,10 @@ Default values if the user gives none
 """
 
 DEFAULT_SUBREDDITS = ["hikingHungary", "RealHungary"]  # add more here if you want
-DEFAULT_OUTDIR = "/home/szabol/SavedFromReddit_2"                       # base output directory
-VISITED_FILE      = pathlib.Path("./visited.txt") #this is where it puts the names of the files that it worked on
-TIMEOUTS_FILE = pathlib.Path("./timeouts.txt")  # names of aborted files (relative keys)
+DEFAULT_OUTDIR = "/home/szabol/SavedFromReddit_2"      # base output directory
+
+VISITED_FILE   = pathlib.Path("./visited.txt")   # one-shot mode: names of processed subreddits
+TIMEOUTS_FILE  = pathlib.Path("./timeouts.txt")  # names of aborted files (relative keys)
 
 """
 Fields used
@@ -27,47 +30,230 @@ Fields used
 """
 
 SUB_FIELDS = [
-    "id","title","author","subreddit","created_utc","selftext","url",
-    "permalink","num_comments","score","over_18","spoiler","locked","stickied"
+    "id", "title", "author", "subreddit", "created_utc", "selftext", "url",
+    "permalink", "num_comments", "score", "over_18", "spoiler", "locked", "stickied"
 ]
 CMT_FIELDS = [
-    "id","author","subreddit","created_utc","body","score",
-    "parent_id","link_id","permalink","is_submitter"
+    "id", "author", "subreddit", "created_utc", "body", "score",
+    "parent_id", "link_id", "permalink", "is_submitter"
 ]
 
+# TXT header format:
+# === r/<subreddit> === visited: YYYY.MM.DD
+HDR_RE = re.compile(
+    r"^=== r/(?P<name>[^ ]+) ===(?: visited: (?P<date>\d{4}\.\d{2}\.\d{2}))?\s*$"
+)
 
-"""
-Helping Functions
-- Small utilities for parsing dates, filesystem safety, and (ND)JSON append.
-"""
+
+# ---------------------------
+# visited.txt / timeouts.txt
+# ---------------------------
+
 def add_to_visited(name: str) -> None:
     VISITED_FILE.touch(exist_ok=True)
     cur = set(x.strip() for x in VISITED_FILE.read_text(encoding="utf-8").splitlines() if x.strip())
     if name not in cur:
         with VISITED_FILE.open("a", encoding="utf-8") as f:
             f.write(name + "\n")
+
+
 def is_visited(name: str) -> bool:
     """
-    Checks if the file name is in the visited section, so that it only works on every file once
+    Checks if the subreddit name is in the visited section (one-shot mode).
     """
     VISITED_FILE.touch(exist_ok=True)
     return name in {x.strip() for x in VISITED_FILE.read_text(encoding="utf-8").splitlines() if x.strip()}
 
+
 def add_to_timeouts(name: str) -> None:
     """
-    If the file prcessing is halted, its name will get added to timeouts
+    If the file processing is halted, its name will get added to timeouts
     """
     TIMEOUTS_FILE.touch(exist_ok=True)
-    cur = set(
-        x.strip() for x in TIMEOUTS_FILE.read_text(encoding="utf-8").splitlines() if x.strip()
-    )
+    cur = set(x.strip() for x in TIMEOUTS_FILE.read_text(encoding="utf-8").splitlines() if x.strip())
     if name not in cur:
         with TIMEOUTS_FILE.open("a", encoding="utf-8") as f:
             f.write(name + "\n")
 
+
+# ---------------------------
+# Small utils
+# ---------------------------
+
+def ensure_dir(p: str):
+    if p:
+        os.makedirs(p, exist_ok=True)
+
+
+def to_epoch(dt: Optional[str]) -> Optional[int]:
+    """
+    dt can be:
+      - None
+      - '2025-08-01' (UTC 00:00:00)
+      - '2025-08-01T14:30:00' (UTC)
+      - epoch string (e.g. '1722575400')
+    Returns epoch seconds (UTC) or None.
+    """
+    if dt is None:
+        return None
+    try:
+        return int(float(dt))  # already epoch
+    except ValueError:
+        pass
+    if "T" in dt:
+        return int(datetime.fromisoformat(dt).replace(tzinfo=timezone.utc).timestamp())
+    return int(datetime.fromisoformat(dt + "T00:00:00").replace(tzinfo=timezone.utc).timestamp())
+
+
+def epoch_to_visited_date_str(epoch_s: int) -> str:
+    """
+    Convert epoch seconds to 'YYYY.MM.DD' in UTC.
+    """
+    return datetime.fromtimestamp(epoch_s, tz=timezone.utc).strftime("%Y.%m.%d")
+
+
+def now_utc_visited_date_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y.%m.%d")
+
+
+def truncate_file(path: str) -> None:
+    ensure_dir(os.path.dirname(path) or ".")
+    with open(path, "w", encoding="utf-8"):
+        pass
+
+
+# ---------------------------
+# NDJSON write (append)
+# ---------------------------
+
+def ndjson_append(path: str, items) -> None:
+    """
+    Append a list of dicts to an NDJSON file (one JSON per line).
+    """
+    ensure_dir(os.path.dirname(path) or ".")
+    with open(path, "a", encoding="utf-8") as f:
+        for it in items:
+            f.write(json.dumps(it, ensure_ascii=False) + "\n")
+
+
+# ---------------------------
+# TXT header (visited stamp)
+# ---------------------------
+
+def read_txt_visited_date(txt_path: str, subreddit_name: str) -> Optional[str]:
+    """
+    Returns 'YYYY.MM.DD' from the first line if it matches header format for this subreddit, else None.
+    """
+    if not os.path.exists(txt_path):
+        return None
+    try:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            first = f.readline().rstrip("\n")
+        m = HDR_RE.match(first)
+        if not m:
+            return None
+        if (m.group("name") or "").lower() != subreddit_name.lower():
+            return None
+        return m.group("date")
+    except Exception:
+        return None
+
+
+def set_txt_header_visited(txt_path: str, subreddit_name: str, visited_date: str) -> None:
+    """
+    Ensure first line is:
+      === r/<subreddit_name> === visited: YYYY.MM.DD
+    If header exists -> replace/update.
+    If not -> insert header line at top (preserving existing content).
+    Tries in-place update if possible (same byte length); otherwise rewrites with a temp file.
+    """
+    ensure_dir(os.path.dirname(txt_path) or ".")
+    new_header = f"=== r/{subreddit_name} === visited: {visited_date}"
+    new_header_line = new_header + "\n"
+    new_bytes = new_header_line.encode("utf-8")
+
+    if not os.path.exists(txt_path):
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(new_header_line + "\n")
+        return
+
+    # Try in-place update (fast) if the first line already is a header and same length
+    try:
+        with open(txt_path, "r+b") as fb:
+            first_bytes = fb.readline()  # includes newline
+            try:
+                first_line = first_bytes.decode("utf-8").rstrip("\n")
+            except Exception:
+                first_line = ""
+
+            m = HDR_RE.match(first_line)
+            if m and (m.group("name") or "").lower() == subreddit_name.lower():
+                if len(first_bytes) == len(new_bytes):
+                    fb.seek(0)
+                    fb.write(new_bytes)
+                    return
+    except Exception:
+        pass
+
+    # Fallback: rewrite via temp file
+    tmp = txt_path + ".tmp"
+    with open(txt_path, "r", encoding="utf-8") as fin, open(tmp, "w", encoding="utf-8") as fout:
+        first = fin.readline()
+        rest = fin.read()
+
+        first_stripped = first.rstrip("\n")
+        m = HDR_RE.match(first_stripped)
+        if m and (m.group("name") or "").lower() == subreddit_name.lower():
+            # Replace existing header
+            fout.write(new_header_line)
+            fout.write(rest)
+        else:
+            # Insert header above existing content
+            fout.write(new_header_line)
+            fout.write(first)
+            fout.write(rest)
+
+    os.replace(tmp, txt_path)
+
+
+# ---------------------------
+# Meta for NDJSON mode
+# ---------------------------
+
+def meta_path(out_dir: str, subreddit_name: str) -> str:
+    return os.path.join(out_dir, f"{subreddit_name}.meta.json")
+
+
+def read_meta_visited_date(meta_file: str) -> Optional[str]:
+    if not os.path.exists(meta_file):
+        return None
+    try:
+        with open(meta_file, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        v = d.get("visited")
+        return v if isinstance(v, str) else None
+    except Exception:
+        return None
+
+
+def write_meta(meta_file: str, subreddit_name: str, visited_date: str) -> None:
+    ensure_dir(os.path.dirname(meta_file) or ".")
+    payload = {
+        "subreddit": subreddit_name,
+        "visited": visited_date,
+        "updated_utc": int(datetime.now(timezone.utc).timestamp()),
+    }
+    with open(meta_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------
+# Subreddit resolve
+# ---------------------------
+
 def resolve_subreddit(reddit: praw.Reddit, name: str):
     """
-    Checks if the subbreddit exists and also normalizes names
+    Checks if the subreddit exists and also normalizes names.
     Return a PRAW Subreddit or None if not accessible/doesn't exist.
     """
     name = name.strip()
@@ -77,9 +263,7 @@ def resolve_subreddit(reddit: praw.Reddit, name: str):
         name = name[2:]
     sr = reddit.subreddit(name)
     try:
-        # Force a fetch to validate existence & access
-        sr._fetch()
-        # Optionally warn about quarantined subs (app-only auth nem fog opt-inelni)
+        sr._fetch()  # force fetch
         if getattr(sr, "quarantine", False):
             print(f"[skip] r/{name} is quarantined (requires opt-in, skip with app-only auth).")
             return None
@@ -94,9 +278,10 @@ def resolve_subreddit(reddit: praw.Reddit, name: str):
         print(f"[skip] r/{name} unknown error: {e!r}")
     return None
 
-"""
-loads subbreddit names from file
-"""
+
+# ---------------------------
+# Load subreddits from file
+# ---------------------------
 
 def load_subreddits_from_file(path: str) -> list[str]:
     """
@@ -115,7 +300,6 @@ def load_subreddits_from_file(path: str) -> list[str]:
                 continue
             if line.lower().startswith("r/"):
                 line = line[2:]
-            # keep only simple subreddit token (no spaces)
             line = line.split()[0]
             if line and line not in seen:
                 seen.add(line)
@@ -124,75 +308,11 @@ def load_subreddits_from_file(path: str) -> list[str]:
         raise RuntimeError(f"No subreddits found in file: {path}")
     return subs
 
-"""
-Checks if date time is valid
-- Accepts None, ISO-8601 (with optional time), or an epoch string.
-- Returns epoch seconds (UTC) or None.
-"""
-def to_epoch(dt: Optional[str]) -> Optional[int]:
-    """
-    dt can be:
-      - None
-      - '2025-08-01' (UTC 00:00:00)
-      - '2025-08-01T14:30:00' (UTC)
-      - epoch string (e.g. '1722575400')
-    """
-    if dt is None:
-        return None
-    try:
-        return int(float(dt))  # already epoch
-    except ValueError:
-        pass
-    if "T" in dt:
-        return int(datetime.fromisoformat(dt).replace(tzinfo=timezone.utc).timestamp())
-    return int(datetime.fromisoformat(dt + "T00:00:00").replace(tzinfo=timezone.utc).timestamp())
 
+# ---------------------------
+# Normalize PRAW objects
+# ---------------------------
 
-"""
-Checks if directory exists
-- Creates target directory recursively if missing.
-"""
-def ensure_dir(p: str):
-    if p:
-        os.makedirs(p, exist_ok=True)
-
-
-"""
-Append a list of dicts to an NDJSON file
-- Ensures the directory exists; writes one JSON object per line (UTF-8).
-"""
-def ndjson_append(path: str, items):
-    ensure_dir(os.path.dirname(path) or ".")
-    with open(path, "w", encoding="utf-8") as f:
-        for it in items:
-            f.write(json.dumps(it, ensure_ascii=False) + "\n")
-
-
-"""
-Scan an NDJSON submissions file and return the oldest created_utc
-- Useful for simple "resume" behavior (deciding 'after').
-"""
-def last_submission_ts(path: str) -> Optional[int]:
-    """Returns the oldest created_utc found in the file (for simple resume)."""
-    if not os.path.exists(path):
-        return None
-    last_ts = None
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                d = json.loads(line)
-                cu = int(d.get("created_utc", 0))
-                if last_ts is None or cu < last_ts:
-                    last_ts = cu
-            except Exception:
-                continue
-    return last_ts
-
-
-"""
-Normalize PRAW objects to plain dicts using a whitelist of fields
-- Converts complex types (author, subreddit) to simple strings where needed.
-"""
 def normalize(obj: dict, fields: list[str]) -> dict:
     out = {}
     for k in fields:
@@ -200,78 +320,63 @@ def normalize(obj: dict, fields: list[str]) -> dict:
         if k == "author" and v is not None and not isinstance(v, str):
             v = getattr(v, "name", None)
         if k == "subreddit" and v is not None and not isinstance(v, str):
-            # PRAW Subreddit object -> display_name
             v = str(getattr(v, "display_name", v))
         out[k] = v
     return out
 
 
-# ===== TXT output helpers =====
+# ---------------------------
+# TXT output helpers
+# ---------------------------
 
-"""
-Fallback author rendering
-- Reddit returns None for deleted users so i made delted as a placeholder becase that stands in the app
-"""
 def _fallback_author(a):
     return a if a else "[deleted]"
 
-"""
-Sanitize and indent multiline text blocks for nice TXT formatting
-- Keeps first line; subsequent lines are indented for readability.
-"""
+
 def _safe_text(s: Optional[str]) -> str:
     if not s:
         return ""
     s = s.replace("\r", "")
     lines = s.split("\n")
-    # keep first line, indent the rest
     return ("\n      ").join(lines)
 
-"""
-Write a single post + its comments as a readable TXT block
-- Simple, human-friendly structure for later reading/grepping.
-"""
+
 def txt_write_post_block(f, post: dict, comments: list[dict]):
-    # Post header
     author = _fallback_author(post.get("author"))
-    title  = post.get("title") or ""
+    title = post.get("title") or ""
     f.write("Post:\n")
     f.write(f"by {author}: {title}\n")
-    # Optional selftext
+
     body = _safe_text(post.get("selftext"))
     if body:
         f.write("  body:\n")
         f.write(f"    {body}\n")
-    # Comments
+
     for c in comments:
         cauthor = _fallback_author(c.get("author"))
-        cbody   = _safe_text(c.get("body"))
+        cbody = _safe_text(c.get("body"))
         f.write("  comment:\n")
         f.write(f"    {cauthor}: {cbody}\n")
+
     f.write("\n")
 
 
-"""
-Initialize a PRAW Reddit client with auth
-- Loads credentials from .env; performs a minimal "smoke test" to ensure read scope.
-- Prints helpful diagnostics and raises a clear error if both methods fail.
-"""
+# ---------------------------
+# Reddit init
+# ---------------------------
+
 def init_reddit() -> praw.Reddit:
     load_dotenv()
-    cid  = os.getenv("REDDIT_CLIENT_ID","").strip()
-    csec = os.getenv("REDDIT_CLIENT_SECRET","").strip()
-    ua   = os.getenv("REDDIT_USER_AGENT","").strip()
-    user = os.getenv("REDDIT_USERNAME","").strip()
-    pwd  = os.getenv("REDDIT_PASSWORD","").strip()
+    cid = os.getenv("REDDIT_CLIENT_ID", "").strip()
+    csec = os.getenv("REDDIT_CLIENT_SECRET", "").strip()
+    ua = os.getenv("REDDIT_USER_AGENT", "").strip()
 
     if not ua:
         raise RuntimeError("Missing REDDIT_USER_AGENT.")
 
     def smoke_test(r):
-        # minimal read scope probe
         next(iter(r.subreddit("popular").hot(limit=1)))
 
-    # --- 1) App-only (client_credentials) ---
     if cid and csec:
         try:
             r = praw.Reddit(
@@ -287,28 +392,22 @@ def init_reddit() -> praw.Reddit:
         except Exception as e:
             print("[auth] FAIL app-only:", repr(e))
 
-   
-    # --- Detailed error message with hints ---
-    msg = [
-        "Authentication error"
-    ]
-    raise RuntimeError("\n".join(msg))
+    raise RuntimeError("Authentication error")
 
 
-# ========== Download ==========
+# ---------------------------
+# Iteration helper
+# ---------------------------
 
-"""
-Iterate the 'new' feed backwards with time-window and hard-limit controls
-"""
 def iter_new_until(subreddit, before: Optional[int], after: Optional[int], hard_limit: Optional[int]) -> Iterable[Submission]:
     """
     We read the 'new' feed in descending order. Stop when created_utc < after or limit reached.
+    Includes submissions with created_utc >= after.
     """
     count = 0
     for s in subreddit.new(limit=None):
         cu = int(getattr(s, "created_utc", 0))
         if before is not None and cu > before:
-            # too fresh -> continue (feed is descending)
             continue
         if after is not None and cu < after:
             break
@@ -318,13 +417,10 @@ def iter_new_until(subreddit, before: Optional[int], after: Optional[int], hard_
             break
 
 
-"""
-Download submissions + optional comments for one subreddit
-- Supports NDJSON output (submissions/comments) or a single human-readable TXT file ("plain" mode).
-- Applies time window (after/before), post count limit, and sleep between requests.
-- Buffers NDJSON writes for efficiency; 
-- writes TXT progressively in plain mode.
-"""
+# ---------------------------
+# Main download
+# ---------------------------
+
 def download_submissions_and_comments(
     reddit: praw.Reddit,
     subreddit_name: str,
@@ -334,39 +430,65 @@ def download_submissions_and_comments(
     limit_posts: Optional[int],
     sleep_s: float = 0.5,
     include_comments: bool = True,
-    plain: bool = False,  # new param: enable TXT mode instead of json
+    plain: bool = False,
+    incremental: bool = False,
+    visited_tag: Optional[str] = None,  # e.g. '2026.02.18'
 ):
-    sr = resolve_subreddit(reddit, subreddit_name)
+    """
+    - plain=True  -> one TXT file per subreddit (posts + comments embedded)
+    - plain=False -> NDJSON submissions + NDJSON comments
 
+    incremental=True is meant for --after usage:
+    - append to existing files (do NOT truncate)
+    - visited_tag is used to stamp "visited: YYYY.MM.DD"
+    """
+
+    sr = resolve_subreddit(reddit, subreddit_name)
     if sr is None:
-        
         return
 
     ensure_dir(out_dir)
+
     sub_path = os.path.join(out_dir, f"{subreddit_name}.submissions.ndjson")
     cmt_path = os.path.join(out_dir, f"{subreddit_name}.comments.ndjson")
-    txt_path = os.path.join(out_dir, f"{subreddit_name}.txt")  # target for plain mode
+    txt_path = os.path.join(out_dir, f"{subreddit_name}.txt")
+    meta_file = meta_path(out_dir, subreddit_name)
 
-    
-    if after is None:
-        _existing_oldest = last_submission_ts(sub_path)
-        # If desired, you could set after = _existing_oldest here to strictly continue.
+    # Snapshot mode: start from clean files for NDJSON
+    if not plain and not incremental:
+        truncate_file(sub_path)
+        if include_comments:
+            truncate_file(cmt_path)
 
     subs_saved = 0
     cmts_saved = 0
-
     submissions_buf = []
     comments_buf = []
 
-    # Plain mode: open TXT once and append each post immediately
-    txt_file = open(txt_path, "w", encoding="utf-8") if plain else None
-    if txt_file and os.path.getsize(txt_path) == 0:
-        txt_file.write(f"=== r/{subreddit_name} ===\n\n")
+    txt_file = None
+    new_txt_created = False
+
+    # Decide file mode for TXT
+    if plain:
+        if incremental:
+            if not os.path.exists(txt_path):
+                # new file -> create it, write content first; header will be inserted/stamped at end if needed
+                txt_file = open(txt_path, "w", encoding="utf-8")
+                new_txt_created = True
+            else:
+                txt_file = open(txt_path, "a", encoding="utf-8")
+        else:
+            # snapshot: overwrite
+            txt_file = open(txt_path, "w", encoding="utf-8")
+            new_txt_created = True
+            # write header immediately in snapshot mode
+            stamp = visited_tag or now_utc_visited_date_str()
+            txt_file.write(f"=== r/{subreddit_name} === visited: {stamp}\n\n")
 
     try:
         pbar = tqdm(desc=f"Submissions r/{subreddit_name}", unit="post")
+
         for s in iter_new_until(sr, before=before, after=after, hard_limit=limit_posts):
-            # Build submission dict + normalize
             s_dict = {
                 "id": s.id,
                 "title": s.title,
@@ -385,7 +507,6 @@ def download_submissions_and_comments(
             }
             s_norm = normalize(s_dict, SUB_FIELDS)
 
-            # Expand and collect comments (if requested)
             current_comments = []
             if include_comments and s.num_comments:
                 s.comments.replace_more(limit=None)
@@ -410,50 +531,93 @@ def download_submissions_and_comments(
                 subs_saved += 1
                 cmts_saved += len(current_comments)
             else:
-                # NDJSON path (buffer + flush)
+                # NDJSON: buffer + flush append
                 submissions_buf.append(s_norm)
                 subs_saved += 1
+
                 if current_comments:
                     comments_buf.extend(current_comments)
                     cmts_saved += len(current_comments)
 
-                # Periodic flush for efficiency
                 if len(submissions_buf) >= 50:
-                    ndjson_append(sub_path, submissions_buf); submissions_buf.clear()
-                if len(comments_buf) >= 200:
-                    ndjson_append(cmt_path, comments_buf); comments_buf.clear()
+                    ndjson_append(sub_path, submissions_buf)
+                    submissions_buf.clear()
+
+                if include_comments and len(comments_buf) >= 200:
+                    ndjson_append(cmt_path, comments_buf)
+                    comments_buf.clear()
 
             pbar.update(1)
-            time.sleep(sleep_s)  # be gentle to the API because you can get timeout if you spam
+            time.sleep(sleep_s)
 
         pbar.close()
 
-      
+        # Flush remaining buffers
         if not plain:
             if submissions_buf:
                 ndjson_append(sub_path, submissions_buf)
-            if comments_buf:
+            if include_comments and comments_buf:
                 ndjson_append(cmt_path, comments_buf)
 
+        # After SUCCESS: stamp visited
+        if visited_tag:
+            if plain:
+                # If snapshot mode header already written, this just updates the date.
+                # If incremental and header missing, this will insert it at top.
+                set_txt_header_visited(txt_path, subreddit_name, visited_tag)
+            else:
+                write_meta(meta_file, subreddit_name, visited_tag)
+
     except (Redirect, NotFound, Forbidden) as e:
-        print(f" skipping because we subbredit is private or no longer exists {e.__class__.__name__} downloaded:")
+        print(f" skipping because subreddit is private or no longer exists ({e.__class__.__name__})")
+        # If we created a brand-new TXT in incremental and failed, remove it to avoid false "visited"
+        if plain and incremental and new_txt_created:
+            try:
+                txt_file.close()
+            except Exception:
+                pass
+            try:
+                os.remove(txt_path)
+            except Exception:
+                pass
         return
-    
+
+    except Exception:
+        # If we created a brand-new TXT in incremental and failed, remove it to avoid false "visited"
+        if plain and incremental and new_txt_created:
+            try:
+                if txt_file:
+                    txt_file.close()
+            except Exception:
+                pass
+            try:
+                os.remove(txt_path)
+            except Exception:
+                pass
+        raise
+
     finally:
         if txt_file:
-            txt_file.flush()
-            txt_file.close()
+            try:
+                txt_file.flush()
+                txt_file.close()
+            except Exception:
+                pass
 
-    print(f"[✓] Saved: {subs_saved} posts  -> {'{}/{}.txt'.format(out_dir, subreddit_name) if plain else sub_path}")
-    if include_comments:
-        print(f"[✓] Saved: {cmts_saved} comments -> {'(embedded in TXT)' if plain else cmt_path}")
+    if plain:
+        print(f"[✓] Saved: {subs_saved} posts  -> {txt_path}")
+        if include_comments:
+            print(f"[✓] Saved: {cmts_saved} comments -> (embedded in TXT)")
+    else:
+        print(f"[✓] Saved: {subs_saved} posts  -> {sub_path}")
+        if include_comments:
+            print(f"[✓] Saved: {cmts_saved} comments -> {cmt_path}")
 
 
+# ---------------------------
+# CLI main
+# ---------------------------
 
-"""
-Command-line entry point
-downloads one or more subreddits using the selected mode and filters.
-"""
 def main():
     ap = argparse.ArgumentParser(description="Reddit subreddit downloader (posts + comments, Reddit API/PRAW)")
     ap.add_argument("subreddit", nargs="*", help="e.g. RealHungary or hikingHungary (you can pass multiple separated by space)")
@@ -468,19 +632,27 @@ def main():
     ap.add_argument("--inputfile", help="path to a text file listing subreddits (one per line)", default=None)
 
     args = ap.parse_args()
-    after = to_epoch(args.after)
-    before = to_epoch(args.before)
 
-    # Auth check (optional flag)
+    after_epoch = to_epoch(args.after)
+    before_epoch = to_epoch(args.before)
+
+    # incremental mode: if --after is used, we append + visited stamping + up-to-date check
+    incremental = (args.after is not None)
+
+    # visited stamp: in incremental mode the user-provided after date is the "target" visited date (YYYY.MM.DD)
+    # in snapshot mode we stamp with today's UTC date
+    if incremental:
+        visited_tag = epoch_to_visited_date_str(after_epoch) if after_epoch is not None else now_utc_visited_date_str()
+    else:
+        visited_tag = now_utc_visited_date_str()
+
     reddit = init_reddit()
-
 
     if args.auth_test:
         print("[auth] smoke test successful – exiting (--auth-test)")
         return
 
-    #If there is an imput file we will read the subreddit names from there.
-
+    # Load subreddits
     if args.inputfile:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         inpath = args.inputfile
@@ -494,34 +666,49 @@ def main():
     outdir = args.out if args.out else DEFAULT_OUTDIR
 
     for sr in subreddits:
-        
-        if is_visited(sr):
-            print(f"Already processed {sr}")
-            continue
-        
+        # one-shot mode (no --after): keep old visited.txt behavior
+        if not incremental:
+            if is_visited(sr):
+                print(f"Already processed {sr}")
+                continue
+
+        # incremental mode: check "visited" inside the subreddit output
+        if incremental:
+            if args.plain:
+                txt_path = os.path.join(outdir, f"{sr}.txt")
+                prev = read_txt_visited_date(txt_path, sr)
+            else:
+                prev = read_meta_visited_date(meta_path(outdir, sr))
+
+            if prev == visited_tag:
+                print(f"[up-to-date] r/{sr} visited: {prev} == --after ({visited_tag})")
+                continue
+            if prev is not None and prev > visited_tag:
+                print(f"[skip] r/{sr} has visited: {prev} which is newer than --after ({visited_tag})")
+                continue
+
         try:
             download_submissions_and_comments(
                 reddit=reddit,
                 subreddit_name=sr,
                 out_dir=outdir,
-                after=after,
-                before=before,
+                after=after_epoch,
+                before=before_epoch,
                 limit_posts=args.limit,
                 sleep_s=args.sleep,
                 include_comments=(not args.no_comments),
-                plain=args.plain,  # pass through TXT mode
+                plain=args.plain,
+                incremental=incremental,
+                visited_tag=visited_tag,
             )
-            add_to_visited(sr)
 
-            
+            if not incremental:
+                add_to_visited(sr)
+
         except Exception as e:
-            # abort this file, do NOT mark visited, DO add to timeouts
-        
             print(f"[ABORT FILE] {sr} due to failure: {e}")
             add_to_timeouts(sr)
-            # move on to next file
             continue
-
 
 
 if __name__ == "__main__":
