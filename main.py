@@ -26,7 +26,7 @@ HDR_RE = re.compile(
     r"^=== r/(?P<name>[^ ]+) ===(?: visited: (?P<date>\d{4}\.\d{2}\.\d{2}))?\s*$"
 )
 
-# ---- visited.txt / timeouts.txt (one-shot mode) ----
+# ---- visited.txt / timeouts.txt ----
 def add_to_visited(name: str) -> None:
     VISITED_FILE.touch(exist_ok=True)
     cur = set(x.strip() for x in VISITED_FILE.read_text(encoding="utf-8").splitlines() if x.strip())
@@ -72,7 +72,6 @@ def to_epoch(dt: Optional[str]) -> Optional[int]:
     return int(datetime.fromisoformat(dt + "T00:00:00").replace(tzinfo=timezone.utc).timestamp())
 
 def today_str_yyyy_mm_dd() -> str:
-    # csak dátum kell
     return datetime.now(timezone.utc).strftime("%Y.%m.%d")
 
 def epoch_to_date_str(epoch_s: int) -> str:
@@ -81,9 +80,9 @@ def epoch_to_date_str(epoch_s: int) -> str:
 # ---- Reddit ----
 def init_reddit() -> praw.Reddit:
     load_dotenv()
-    cid  = os.getenv("REDDIT_CLIENT_ID","").strip()
-    csec = os.getenv("REDDIT_CLIENT_SECRET","").strip()
-    ua   = os.getenv("REDDIT_USER_AGENT","").strip()
+    cid  = os.getenv("REDDIT_CLIENT_ID", "").strip()
+    csec = os.getenv("REDDIT_CLIENT_SECRET", "").strip()
+    ua   = os.getenv("REDDIT_USER_AGENT", "").strip()
 
     if not ua:
         raise RuntimeError("Missing REDDIT_USER_AGENT.")
@@ -146,7 +145,7 @@ def load_subreddits_from_file(path: str) -> list[str]:
         raise RuntimeError(f"No subreddits found in file: {path}")
     return subs
 
-# ---- TXT formatting helpers (same structure as your example) ----
+# ---- TXT formatting (same style as before) ----
 def _fallback_author(a) -> str:
     return a if a else "[deleted]"
 
@@ -157,7 +156,7 @@ def _safe_text(s: Optional[str]) -> str:
     lines = s.split("\n")
     return ("\n      ").join(lines)
 
-def txt_write_post_block(f, post_author: str, title: str, selftext: str, comments: list[tuple[str,str]]):
+def txt_write_post_block(f, post_author: str, title: str, selftext: str, comments: list[tuple[str, str]]):
     f.write("Post:\n")
     f.write(f"by {post_author}: {title}\n")
 
@@ -174,6 +173,9 @@ def txt_write_post_block(f, post_author: str, title: str, selftext: str, comment
 
 # ---- Header visited handling ----
 def read_txt_visited_date(txt_path: str, subreddit_name: str) -> Optional[str]:
+    """
+    Returns 'YYYY.MM.DD' if header exists and matches this subreddit.
+    """
     if not os.path.exists(txt_path):
         return None
     try:
@@ -184,17 +186,16 @@ def read_txt_visited_date(txt_path: str, subreddit_name: str) -> Optional[str]:
             return None
         if (m.group("name") or "").lower() != subreddit_name.lower():
             return None
-        return m.group("date")  # can be None
+        return m.group("date")
     except Exception:
         return None
 
 def stamp_txt_header_visited(txt_path: str, subreddit_name: str, visited_date: str) -> None:
     """
-    Ensures the first line is:
+    Ensures first line is:
       === r/<subreddit> === visited: YYYY.MM.DD
-    If existing first line is a header for the same subreddit (with or without visited), it gets replaced.
-    Otherwise the header is inserted at the top.
-    Streaming rewrite (no full memory load).
+    Replace if header exists, else insert at top.
+    Streaming rewrite.
     """
     ensure_dir(os.path.dirname(txt_path) or ".")
     new_header_line = f"=== r/{subreddit_name} === visited: {visited_date}\n"
@@ -212,8 +213,7 @@ def stamp_txt_header_visited(txt_path: str, subreddit_name: str, visited_date: s
         m = HDR_RE.match(first_stripped)
 
         if m and (m.group("name") or "").lower() == subreddit_name.lower():
-            fout.write(new_header_line)
-            # a régi header sorát eldobjuk, a többit visszaírjuk
+            fout.write(new_header_line)  # replace old header
         else:
             fout.write(new_header_line)
             fout.write("\n")
@@ -229,6 +229,7 @@ def iter_new_until(subreddit, before: Optional[int], after: Optional[int], hard_
     Reads 'new' feed in descending order.
     Stops when created_utc < after.
     Includes submissions with created_utc >= after.
+    If after is None -> no lower bound (full history as far as Reddit listing allows).
     """
     count = 0
     for s in subreddit.new(limit=None):
@@ -242,7 +243,7 @@ def iter_new_until(subreddit, before: Optional[int], after: Optional[int], hard_
         if hard_limit and count >= hard_limit:
             break
 
-# ---- Main downloader (TXT ONLY) ----
+# ---- Downloader (TXT ONLY) ----
 def download_subreddit_txt(
     reddit: praw.Reddit,
     subreddit_name: str,
@@ -262,7 +263,9 @@ def download_subreddit_txt(
     ensure_dir(out_dir)
     txt_path = os.path.join(out_dir, f"{subreddit_name}.txt")
 
-    # If we are NOT appending -> write into .part then replace (so failed download won't leave a "visited" file)
+    # Safety:
+    # - Full download (append_mode=False) -> write to .part then replace
+    # - Append update (append_mode=True) -> if file missing, also use .part and then replace
     use_part = (not append_mode) or (append_mode and not os.path.exists(txt_path))
     target_path = (txt_path + ".part") if use_part else txt_path
 
@@ -273,7 +276,7 @@ def download_subreddit_txt(
     f = open(target_path, "a" if (append_mode and not use_part) else "w", encoding="utf-8")
 
     try:
-        # When creating a new file (part file), write a basic header line (no visited yet)
+        # If new file (.part) create base header (visited will be stamped at end)
         if use_part:
             f.write(f"=== r/{subreddit_name} ===\n\n")
 
@@ -284,7 +287,7 @@ def download_subreddit_txt(
             title = s.title or ""
             selftext = getattr(s, "selftext", None) or ""
 
-            comments_out: list[tuple[str,str]] = []
+            comments_out: list[tuple[str, str]] = []
             if include_comments and getattr(s, "num_comments", 0):
                 s.comments.replace_more(limit=None)
                 for c in s.comments.list():
@@ -305,10 +308,10 @@ def download_subreddit_txt(
         f.flush()
         f.close()
 
-        # Stamp header visited (on the file we actually wrote)
+        # Stamp visited at the END (after successful write)
         stamp_txt_header_visited(target_path, subreddit_name, visited_stamp)
 
-        # If .part was used, replace final
+        # Replace final if needed
         if use_part:
             os.replace(target_path, txt_path)
 
@@ -378,18 +381,63 @@ def main():
     outdir = args.out if args.out else DEFAULT_OUTDIR
     include_comments = (not args.no_comments)
 
-    # Update mode if --after is used
     update_mode = (args.after is not None)
 
     # visited stamp:
-    # - update mode: stamp = day-of --after in YYYY.MM.DD (so equality check works)
-    # - normal mode: stamp = today's date
+    # - update mode: stamp = day-of --after (YYYY.MM.DD)  -> egyeztethető "up-to-date" check
+    # - normal mode: stamp = today's date (UTC)
     visited_stamp = epoch_to_date_str(after_epoch) if (update_mode and after_epoch is not None) else today_str_yyyy_mm_dd()
 
     for sr_name in subreddits:
         txt_path = os.path.join(outdir, f"{sr_name}.txt")
 
         if update_mode:
+            # >>> NEW RULE YOU ASKED FOR <<<
+            # If subreddit is NOT in visited.txt -> FULL DOWNLOAD (ignore --after)
+            # If subreddit IS in visited.txt -> incremental update (append) using --after
+            if not is_visited(sr_name):
+                print(f"[new] r/{sr_name} not in visited.txt -> FULL download (ignoring --after)")
+                try:
+                    download_subreddit_txt(
+                        reddit=reddit,
+                        subreddit_name=sr_name,
+                        out_dir=outdir,
+                        after=None,                 # ignore --after here
+                        before=before_epoch,
+                        limit_posts=args.limit,
+                        sleep_s=args.sleep,
+                        include_comments=include_comments,
+                        append_mode=False,          # overwrite / fresh file
+                        visited_stamp=visited_stamp # stamp with --after day (so future run can be up-to-date)
+                    )
+                    add_to_visited(sr_name)         # now "visited"
+                except Exception as e:
+                    print(f"[ABORT FILE] {sr_name} due to failure: {e}")
+                    add_to_timeouts(sr_name)
+                continue
+
+            # Visited already -> apply after logic + append
+            if not os.path.exists(txt_path):
+                # visited.txt says visited, but file missing -> safest is full download
+                print(f"[warn] r/{sr_name} in visited.txt but file missing -> FULL download")
+                try:
+                    download_subreddit_txt(
+                        reddit=reddit,
+                        subreddit_name=sr_name,
+                        out_dir=outdir,
+                        after=None,
+                        before=before_epoch,
+                        limit_posts=args.limit,
+                        sleep_s=args.sleep,
+                        include_comments=include_comments,
+                        append_mode=False,
+                        visited_stamp=visited_stamp
+                    )
+                except Exception as e:
+                    print(f"[ABORT FILE] {sr_name} due to failure: {e}")
+                    add_to_timeouts(sr_name)
+                continue
+
             prev = read_txt_visited_date(txt_path, sr_name)
 
             if prev == visited_stamp:
@@ -399,19 +447,18 @@ def main():
                 print(f"[up-to-date] r/{sr_name} visited: {prev} newer than --after ({visited_stamp})")
                 continue
 
-            # append new posts since --after
             try:
                 download_subreddit_txt(
                     reddit=reddit,
                     subreddit_name=sr_name,
                     out_dir=outdir,
-                    after=after_epoch,
+                    after=after_epoch,           # apply --after
                     before=before_epoch,
                     limit_posts=args.limit,
                     sleep_s=args.sleep,
                     include_comments=include_comments,
-                    append_mode=True,
-                    visited_stamp=visited_stamp,
+                    append_mode=True,            # append update
+                    visited_stamp=visited_stamp
                 )
             except Exception as e:
                 print(f"[ABORT FILE] {sr_name} due to failure: {e}")
@@ -419,7 +466,7 @@ def main():
                 continue
 
         else:
-            # one-shot behavior (like before) using visited.txt
+            # Non-update mode (old behavior): process each only once using visited.txt
             if is_visited(sr_name):
                 print(f"Already processed {sr_name}")
                 continue
@@ -434,8 +481,8 @@ def main():
                     limit_posts=args.limit,
                     sleep_s=args.sleep,
                     include_comments=include_comments,
-                    append_mode=False,          # overwrite (new full download)
-                    visited_stamp=visited_stamp # today
+                    append_mode=False,
+                    visited_stamp=visited_stamp
                 )
                 add_to_visited(sr_name)
             except Exception as e:
