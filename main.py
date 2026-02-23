@@ -4,7 +4,7 @@ import argparse
 import pathlib
 import re
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Iterable
 
 import praw
@@ -13,9 +13,16 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 from prawcore import Redirect, NotFound, Forbidden
 
+# --- Optional: local day in Budapest ---
+try:
+    from zoneinfo import ZoneInfo
+    LOCAL_TZ = ZoneInfo("Europe/Budapest")
+except Exception:
+    LOCAL_TZ = timezone.utc  # fallback
+
 # ---- Defaults ----
 DEFAULT_SUBREDDITS = ["hikingHungary", "RealHungary"]
-DEFAULT_OUTDIR = "/home/szabol/SavedFromReddit_3"
+DEFAULT_OUTDIR = "/home/szabol/SavedFromReddit_2"
 
 VISITED_FILE = pathlib.Path("./visited.txt")
 TIMEOUTS_FILE = pathlib.Path("./timeouts.txt")
@@ -50,32 +57,33 @@ def ensure_dir(p: str) -> None:
     if p:
         os.makedirs(p, exist_ok=True)
 
-def to_epoch(dt: Optional[str]) -> Optional[int]:
+def today_str_yyyy_mm_dd() -> str:
+    # "ma" a helyi (Budapest) naptári nap szerint
+    return datetime.now(LOCAL_TZ).strftime("%Y.%m.%d")
+
+def now_epoch() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+def parse_yyyy_mm_dd_dot(s: str) -> Optional[datetime]:
+    # 'YYYY.MM.DD' -> tz-aware local midnight
+    try:
+        d = datetime.strptime(s, "%Y.%m.%d")
+        return d.replace(tzinfo=LOCAL_TZ)
+    except Exception:
+        return None
+
+def visited_date_to_after_epoch_next_day(visited_str: str) -> Optional[int]:
     """
-    Accepts:
-      - None
-      - '2026-02-18' (UTC 00:00:00)
-      - '2026-02-18T14:30:00' (UTC)
-      - epoch string (e.g. '1708214400')
-    Returns epoch seconds (UTC) or None.
+    visited: YYYY.MM.DD jelenti, hogy azon a napon már frissítve volt.
+    Update-hez innen a következő nap 00:00-tól töltünk (visited + 1 nap),
+    hogy ne duplázzuk a visited napi posztokat.
     """
+    dt = parse_yyyy_mm_dd_dot(visited_str)
     if dt is None:
         return None
-    try:
-        return int(float(dt))
-    except ValueError:
-        pass
-
-    if "T" in dt:
-        return int(datetime.fromisoformat(dt).replace(tzinfo=timezone.utc).timestamp())
-
-    return int(datetime.fromisoformat(dt + "T00:00:00").replace(tzinfo=timezone.utc).timestamp())
-
-def today_str_yyyy_mm_dd() -> str:
-    return datetime.now(timezone.utc).strftime("%Y.%m.%d")
-
-def epoch_to_date_str(epoch_s: int) -> str:
-    return datetime.fromtimestamp(epoch_s, tz=timezone.utc).strftime("%Y.%m.%d")
+    start = (dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    # epoch UTC-ben
+    return int(start.astimezone(timezone.utc).timestamp())
 
 # ---- Reddit ----
 def init_reddit() -> praw.Reddit:
@@ -229,7 +237,7 @@ def iter_new_until(subreddit, before: Optional[int], after: Optional[int], hard_
     Reads 'new' feed in descending order.
     Stops when created_utc < after.
     Includes submissions with created_utc >= after.
-    If after is None -> no lower bound (full history as far as Reddit listing allows).
+    If after is None -> no lower bound (as far back as the listing provides).
     """
     count = 0
     for s in subreddit.new(limit=None):
@@ -265,18 +273,17 @@ def download_subreddit_txt(
 
     # Safety:
     # - Full download (append_mode=False) -> write to .part then replace
-    # - Append update (append_mode=True) -> if file missing, also use .part and then replace
+    # - Append update (append_mode=True) -> if file missing, also use .part then replace
     use_part = (not append_mode) or (append_mode and not os.path.exists(txt_path))
     target_path = (txt_path + ".part") if use_part else txt_path
 
     subs_saved = 0
     cmts_saved = 0
 
-    # Open file
     f = open(target_path, "a" if (append_mode and not use_part) else "w", encoding="utf-8")
 
     try:
-        # If new file (.part) create base header (visited will be stamped at end)
+        # If creating a new file (.part), write base header (visited gets stamped at end)
         if use_part:
             f.write(f"=== r/{subreddit_name} ===\n\n")
 
@@ -311,7 +318,6 @@ def download_subreddit_txt(
         # Stamp visited at the END (after successful write)
         stamp_txt_header_visited(target_path, subreddit_name, visited_stamp)
 
-        # Replace final if needed
         if use_part:
             os.replace(target_path, txt_path)
 
@@ -349,18 +355,15 @@ def main():
     ap = argparse.ArgumentParser(description="Reddit subreddit downloader (TXT: posts + comments)")
     ap.add_argument("subreddit", nargs="*", help="e.g. RealHungary (multiple allowed)")
     ap.add_argument("--out", default=None, help=f"output directory (default: {DEFAULT_OUTDIR})")
-    ap.add_argument("--after", help="lower time bound (epoch or ISO e.g., 2024-01-01)", default=None)
-    ap.add_argument("--before", help="upper time bound (epoch or ISO)", default=None)
     ap.add_argument("--limit", type=int, help="max number of posts", default=None)
     ap.add_argument("--no-comments", action="store_true", help="skip comments")
     ap.add_argument("--sleep", type=float, default=0.5, help="sleep between posts (seconds)")
     ap.add_argument("--auth-test", action="store_true", help="only test authentication and exit")
     ap.add_argument("--inputfile", help="path to a text file listing subreddits (one per line)", default=None)
+    ap.add_argument("--update", action="store_true",
+                    help="update mode: if visited != today, append new posts since last visited up to today")
 
     args = ap.parse_args()
-
-    after_epoch = to_epoch(args.after)
-    before_epoch = to_epoch(args.before)
 
     reddit = init_reddit()
     if args.auth_test:
@@ -381,45 +384,28 @@ def main():
     outdir = args.out if args.out else DEFAULT_OUTDIR
     include_comments = (not args.no_comments)
 
-    update_mode = (args.after is not None)
-
-    # visited stamp:
-    # - update mode: stamp = day-of --after (YYYY.MM.DD)  -> egyeztethető "up-to-date" check
-    # - normal mode: stamp = today's date (UTC)
-    visited_stamp = epoch_to_date_str(after_epoch) if (update_mode and after_epoch is not None) else today_str_yyyy_mm_dd()
+    today_stamp = today_str_yyyy_mm_dd()
+    before_epoch = now_epoch()  # update mindig "mostanáig"
 
     for sr_name in subreddits:
         txt_path = os.path.join(outdir, f"{sr_name}.txt")
 
-        if update_mode:
-            # >>> NEW RULE YOU ASKED FOR <<<
-            # If subreddit is NOT in visited.txt -> FULL DOWNLOAD (ignore --after)
-            # If subreddit IS in visited.txt -> incremental update (append) using --after
-            if not is_visited(sr_name):
-                print(f"[new] r/{sr_name} not in visited.txt -> FULL download (ignoring --after)")
-                try:
-                    download_subreddit_txt(
-                        reddit=reddit,
-                        subreddit_name=sr_name,
-                        out_dir=outdir,
-                        after=None,                 # ignore --after here
-                        before=before_epoch,
-                        limit_posts=args.limit,
-                        sleep_s=args.sleep,
-                        include_comments=include_comments,
-                        append_mode=False,          # overwrite / fresh file
-                        visited_stamp=visited_stamp # stamp with --after day (so future run can be up-to-date)
-                    )
-                    add_to_visited(sr_name)         # now "visited"
-                except Exception as e:
-                    print(f"[ABORT FILE] {sr_name} due to failure: {e}")
-                    add_to_timeouts(sr_name)
+        if args.update:
+            prev = read_txt_visited_date(txt_path, sr_name)
+
+            if prev == today_stamp:
+                print(f"[up-to-date] r/{sr_name} visited: {prev} == today ({today_stamp})")
                 continue
 
-            # Visited already -> apply after logic + append
-            if not os.path.exists(txt_path):
-                # visited.txt says visited, but file missing -> safest is full download
-                print(f"[warn] r/{sr_name} in visited.txt but file missing -> FULL download")
+            if prev is not None:
+                # ha véletlenül jövőbeli dátum lenne, inkább ne piszkáljuk
+                if parse_yyyy_mm_dd_dot(prev) and parse_yyyy_mm_dd_dot(prev) > parse_yyyy_mm_dd_dot(today_stamp):
+                    print(f"[skip] r/{sr_name} visited: {prev} is newer than today ({today_stamp})")
+                    continue
+
+            if not os.path.exists(txt_path) or prev is None:
+                # nincs fájl / nincs értelmezhető visited -> full download
+                print(f"[update] r/{sr_name}: no file/visited -> FULL download, then visited={today_stamp}")
                 try:
                     download_subreddit_txt(
                         reddit=reddit,
@@ -431,64 +417,88 @@ def main():
                         sleep_s=args.sleep,
                         include_comments=include_comments,
                         append_mode=False,
-                        visited_stamp=visited_stamp
+                        visited_stamp=today_stamp,
                     )
+                    add_to_visited(sr_name)
                 except Exception as e:
                     print(f"[ABORT FILE] {sr_name} due to failure: {e}")
                     add_to_timeouts(sr_name)
                 continue
 
-            prev = read_txt_visited_date(txt_path, sr_name)
-
-            if prev == visited_stamp:
-                print(f"[up-to-date] r/{sr_name} visited: {prev} == --after ({visited_stamp})")
+            # van visited -> incremental: visited+1 nap 00:00-tól mostanáig
+            after_epoch = visited_date_to_after_epoch_next_day(prev)
+            if after_epoch is None:
+                # ha valamiért nem parse-olható, full download
+                print(f"[warn] r/{sr_name}: visited parse failed -> FULL download, then visited={today_stamp}")
+                try:
+                    download_subreddit_txt(
+                        reddit=reddit,
+                        subreddit_name=sr_name,
+                        out_dir=outdir,
+                        after=None,
+                        before=before_epoch,
+                        limit_posts=args.limit,
+                        sleep_s=args.sleep,
+                        include_comments=include_comments,
+                        append_mode=False,
+                        visited_stamp=today_stamp,
+                    )
+                    add_to_visited(sr_name)
+                except Exception as e:
+                    print(f"[ABORT FILE] {sr_name} due to failure: {e}")
+                    add_to_timeouts(sr_name)
                 continue
-            if prev is not None and prev > visited_stamp:
-                print(f"[up-to-date] r/{sr_name} visited: {prev} newer than --after ({visited_stamp})")
-                continue
 
+            print(f"[update] r/{sr_name}: {prev} -> {today_stamp} (downloading since next day)")
             try:
                 download_subreddit_txt(
                     reddit=reddit,
                     subreddit_name=sr_name,
                     out_dir=outdir,
-                    after=after_epoch,           # apply --after
+                    after=after_epoch,
                     before=before_epoch,
                     limit_posts=args.limit,
                     sleep_s=args.sleep,
                     include_comments=include_comments,
-                    append_mode=True,            # append update
-                    visited_stamp=visited_stamp
-                )
-            except Exception as e:
-                print(f"[ABORT FILE] {sr_name} due to failure: {e}")
-                add_to_timeouts(sr_name)
-                continue
-
-        else:
-            # Non-update mode (old behavior): process each only once using visited.txt
-            if is_visited(sr_name):
-                print(f"Already processed {sr_name}")
-                continue
-
-            try:
-                download_subreddit_txt(
-                    reddit=reddit,
-                    subreddit_name=sr_name,
-                    out_dir=outdir,
-                    after=None,
-                    before=before_epoch,
-                    limit_posts=args.limit,
-                    sleep_s=args.sleep,
-                    include_comments=include_comments,
-                    append_mode=False,
-                    visited_stamp=visited_stamp
+                    append_mode=True,
+                    visited_stamp=today_stamp,
                 )
                 add_to_visited(sr_name)
             except Exception as e:
                 print(f"[ABORT FILE] {sr_name} due to failure: {e}")
                 add_to_timeouts(sr_name)
-                continue
+            continue
+
+        # ---- Non-update mode (one-shot) ----
+        if is_visited(sr_name):
+            print(f"Already processed {sr_name}")
+            continue
+
+        try:
+            download_subreddit_txt(
+                reddit=reddit,
+                subreddit_name=sr_name,
+                out_dir=outdir,
+                after=None,
+                before=before_epoch,
+                limit_posts=args.limit,
+                sleep_s=args.sleep,
+                include_comments=include_comments,
+                append_mode=False,
+                visited_stamp=today_stamp,
+            )
+            add_to_visited(sr_name)
+        except Exception as e:
+            print(f"[ABORT FILE] {sr_name} due to failure: {e}")
+            add_to_timeouts(sr_name)
+            continue
 
 if __name__ == "__main__":
     main()
+
+
+#Használat
+#Teljes letöltés (egyszeri, visited.txt alapján skip-el):
+#python downloader.py --inputfile subs.txt --out /valahova
+#Frissítés (visited != ma → visited+1 naptól mostanáig letölt + append + visited=ma):
+#python downloader.py --inputfile subs.txt --out /valahova --update
