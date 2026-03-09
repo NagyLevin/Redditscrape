@@ -1,19 +1,38 @@
-= Reddit Subreddit Downloader: `main.py`
+= Reddit Subreddit Downloader: `main.py` és `datumcsere.py`
 Levin
 :toc:
 
-== Telepítés és futtatás
+== Cél és összefoglaló
+
+Ez a repo két, egymáshoz kapcsolódó eszközt tartalmaz:
+
+* **`main.py`** – Reddit szubredditek *posztjainak és opcionálisan kommentjeinek* letöltése, *olvasóbarát TXT* fájlokba, szubredditenként egy fájlba.
+* **`datumcsere.py`** – meglévő TXT fájlok *első sorában* a `visited: YYYY.MM.DD` dátumok cseréje *a mai napra* (debug / korrekciós eszköz).
+
+A letöltő script:
+
+* mindig a Reddit `new` feedjét járja be *csökkenő időrendben*,
+* `visited.txt` alapján figyeli, mely szubredditeket töltötted már le,
+* opcionális `--update` módban **csak az utolsó letöltés óta** megjelent posztokat tölti le és *hozzáfűzi* a TXT fájlhoz,
+* a TXT fájlok első sorában egy *fejléc* tartalmazza a legutóbbi sikeres letöltés dátumát:  
+  `=== r/<subreddit> === visited: YYYY.MM.DD`.
+
+== Telepítés
 
 . **Python környezet (ajánlott venv):**
 +
 ----
 python -m venv .venv
+# Windows PowerShell:
+.venv\Scripts\activate
+# Linux/macOS:
 source .venv/bin/activate
+
 pip install praw python-dotenv tqdm
 # vagy: pip install -r requirements.txt
 ----
 
-. **`.env` a `main.py` mellett: (Kell a futáshoz)**
+. **`.env` a `main.py` mellett (kötelező a futáshoz):**
 +
 ----
 REDDIT_CLIENT_ID=xxxxxxxx
@@ -21,30 +40,9 @@ REDDIT_CLIENT_SECRET=yyyyyyyy
 REDDIT_USER_AGENT=mytool/1.0 by u/YourUser
 ----
 
-== Cél és összefoglaló
-Ez a script (`main.py`) Reddit szubredditek *posztjainak és kommentjeinek* letöltését automatizálja a Reddit PRAW kliensen keresztül.
-Támogat időablakot (`--after/--before`), posztlimitet (`--limit`), kommentek opcionális letöltését, valamint kétféle kimenetet:
-*NDJSON* (külön *submissions* és *comments*) vagy egyetlen, olvasóbarát *TXT* fájl szubredditenként (`--plain`).
-A `visited.txt` dokumentálja a már felkeresett subredditeket.
+== Hitelesítés (`main.py`)
 
-*Fontos:* a program **csak akkor hoz létre kimeneti fájlokat**, ha a megadott szubreddit *létezik és elérhető*. A nem létező vagy privát subokat kihagyja, és nem ír ki üres fájlt.
-
-== Fő funkciók
-
-* **Subreddit-ellenőrzés és normalizálás:** `resolve_subreddit()` `_fetch` hívással validálja a szubreddit létét.
-* **Kimeneti módok:**
-** *NDJSON*: `r/<name>.submissions.ndjson` és `r/<name>.comments.ndjson` (egy sor = 1 JSON objektum, pufferelt írás).
-** *Plain TXT*: jól olvasható blokkos szöveg egyetlen `r/<name>.txt` fájlban (`--plain`).
-* **Időablak:** `--after/--before` (epoch vagy ISO-8601), a *new* feedet csökkenő időrendben járja be (`iter_new_until()`).
-* **Kommentek letöltése:** `--no-comments` kapcsolóval kikapcsolható; különben `replace_more(limit=None)` és laposított lista.
-* **API-kímélet:** `--sleep` (alap: 0.5 s) minden poszt után.
-* **TXT formázás:** `_safe_text()` megőrzi a sortöréseket, a további sorokat beljebb húzza; `txt_write_post_block()` emberbarát struktúra.
-
-== Hitelesítés (auth)
-
-Az init *app-only* (client_credentials) módban próbálkozik, siker esetén: `[auth] OK: app-only (client_credentials)`.
-
-Környezeti változók (a `.env`-ből töltve):
+Az `init_reddit()` a `.env`-ből tölti be a szükséges adatokat, és *app-only* (client_credentials) módban csatlakozik.
 
 [cols="1,2,3",options="header"]
 |===
@@ -55,47 +53,56 @@ Környezeti változók (a `.env`-ből töltve):
 |`REDDIT_USER_AGENT` | igen | Pl. `mytool/1.0 by u/YourUser`
 |===
 
-== Alapértelmezések és állományok
+Sikeres hitelesítéskor egy rövid smoke-teszt fut le, és megjelenik:
 
-[cols="1,3,3",options="header"]
+----
+[auth] OK: app-only (client_credentials)
+----
+
+Hiányzó vagy hibás adatok esetén a program `RuntimeError("Authentication error")` kivétellel leáll.
+
+== Alapértelmezések és állományok (`main.py`)
+
+[cols="1,3,4",options="header"]
 |===
 |Név | Alapérték | Jelentés
 
-|`DEFAULT_SUBREDDITS` | `["hikingHungary", "RealHungary"]` | CLI nélkül ezek futnak csak placeholderek.
-|`DEFAULT_OUTDIR` | `/home/szabol/SavedFromReddit` | Kimeneti könyvtár gyökere.
-|`VISITED_FILE` | `./visited.txt` | Feldolgozott szubreddit-nevek listája.
-|`TIMEOUTS_FILE` | — | A kódban hivatkozott (`add_to_timeouts()`), de nincs deklarálva/használva lehetőség jövőbeli használatra
+|`DEFAULT_SUBREDDITS` | `["hikingHungary", "RealHungary"]` | Ha nem adsz meg szubredditet és nincs `--inputfile`, ezeket tölti le.
+|`DEFAULT_OUTDIR` | `/home/szabol/SavedFromReddit_2` | Kimeneti könyvtár gyökere (TXT fájlok ide kerülnek).
+|`VISITED_FILE` | `./visited.txt` | Feldolgozott szubreddit-nevek listája (egy név / sor).
+|`TIMEOUTS_FILE` | `./timeouts.txt` | Olyan szubredditek listája, ahol hiba/túlcsordulás miatt megszakadt a letöltés.
 |===
 
-== Bemenet: szubredditek fájlból
+**Fejléc a TXT fájl elején**
 
-`load_subreddits_from_file(path)` soronként olvas neveket (üres sorok, `#`-kommentek kihagyva; `r/` előtag opcionális, duplikátumok szűrve). Üres lista esetén hiba.
-
-== Időkezelés
-
-`to_epoch(dt)` elfogad: `None`, epoch stringet vagy ISO-8601-et (`YYYY-MM-DD` vagy `YYYY-MM-DDTHH:MM:SS`). Visszatérés: epoch (UTC) vagy `None`.
-
-== Kimeneti formátumok
-
-=== NDJSON mód (alap)
-Két fájl szubredditenként:
-* `<outdir>/<subreddit>.submissions.ndjson`
-* `<outdir>/<subreddit>.comments.ndjson`
-
-Mindkettő NDJSON (soronként 1 JSON). Pufferelt írás: posztoknál 50 elem, kommenteknél 200 elem után flush.
-
-**Submissions mezők (whitelist):**
-`id, title, author, subreddit, created_utc, selftext, url, permalink, num_comments, score, over_18, spoiler, locked, stickied`
-
-**Comments mezők (whitelist):**
-`id, author, subreddit, created_utc, body, score, parent_id, link_id, permalink, is_submitter`
-
-=== Plain TXT mód (`--plain`)
-Egyetlen `<outdir>/<subreddit>.txt`, blokkos szerkezetben:
+Minden TXT fájl első sora a következő formátumot használja:
 
 ----
+=== r/<subreddit> === visited: YYYY.MM.DD
+----
 
-=== r/PÉLDA ===
+Ezt a `stamp_txt_header_visited()` kezeli, és az `update` módnál ez alapján számolja ki, mikortól kell új posztokat letölteni.
+
+== Fő funkciók (`main.py`)
+
+* **Subreddit-ellenőrzés:** `resolve_subreddit()` `_fetch()` hívással validálja a szubreddit létét, és kiszűri a privát / quarantined / nem létező szubredditeket.
+* **Időkezelés (Budapest):**
+** a "mai nap" (`today_str_yyyy_mm_dd()`) a `Europe/Budapest` időzónában számolt naptári nap,
+** `visited_date_to_after_epoch_next_day()` `visited: YYYY.MM.DD` alapján számolja ki a következő nap 00:00 (lokális) időpontjának epochját, ekkortól indul az update.
+* **Letöltés:** `download_subreddit_txt()` a `new` feedet járja be:
+** opcionális `limit_posts`,
+** opcionális komment-letöltés (kommentek beágyazva a TXT-be),
+** minden poszt között `--sleep` másodperc várakozás a rate limit miatt.
+* **Állapotfájlok:**
+** sikeres feldolgozás után a szubreddit neve bekerül a `visited.txt`-be (`add_to_visited()`),
+** hiba esetén a `timeouts.txt`-be kerül (`add_to_timeouts()`).
+
+== TXT formátum (`main.py`)
+
+Minden szubreddithez egyetlen TXT fájl készül:
+
+----
+=== r/PÉLDA === visited: 2025.09.01
 
 Post:
 by alice: Cím
@@ -106,51 +113,80 @@ by alice: Cím
     bob: Szia!
   comment:
     [deleted]: …
+
+Post:
+by charlie: Másik poszt címe
+  body:
+    Poszt szövege…
 ----
 
-== CLI paraméterek
+* a poszt szövege (`selftext`) és a kommentek *többsoros tartalma* beljebb húzva jelenik meg,
+* a kommentek `Post:` blokkon belül, `comment:` prefixszel listázódnak,
+* a fájl elején lévő fejlécet a script frissíti, amikor egy szubreddit letöltése sikeresen befejeződött.
+
+== CLI paraméterek (`main.py`)
 
 [cols="1,1,3,5",options="header"]
 |===
 |Kapcsoló | Típus | Alapérték | Leírás
 
-|`subreddit` | poz. arg | — | Egy vagy több név: `RealHungary hikingHungary`. Ha nincs → `DEFAULT_SUBREDDITS`.
-|`--out` | str | `DEFAULT_OUTDIR` | Kimeneti gyökérkönyvtár.
-|`--after` | str | None | Alsó időkorlát (epoch vagy ISO `YYYY-MM-DD[THH:MM:SS]`, UTC).
-|`--before` | str | None | Felső időkorlát (mint fenti példa).
-|`--limit` | int | None | Posztok max. száma (pl top 50 esetén 50 et lehet Írni).
+|`subreddit` | poz. arg | — | Egy vagy több név: `RealHungary hikingHungary`. Ha hiányzik és nincs `--inputfile`, akkor `DEFAULT_SUBREDDITS`.
+|`--out` | str | `DEFAULT_OUTDIR` | Kimeneti gyökérkönyvtár. Ide kerülnek a `<subreddit>.txt` fájlok.
+|`--limit` | int | None | Posztok max. száma (pl. `--limit 100`).
 |`--no-comments` | flag | False | Kommentek lekérésének tiltása.
 |`--sleep` | float | 0.5 | Szünet posztok között (másodperc).
-|`--plain` | flag | False | TXT mód NDJSON helyett.
-|`--inputfile` | str | None | Szubredditek listája fájlból (soronként; `r/` megengedett; duplikátum-szűrés).
+|`--auth-test` | flag | False | Csak hitelesítés tesztelése, letöltés nélkül. Siker esetén kilép.
+|`--inputfile` | str | None | Szubredditek listája fájlból (soronként; `#` komment; `r/` előtag megengedett; duplikátum-szűrés).
+|`--update` | flag | False | "Update" mód: meglévő TXT-ket frissít az utolsó `visited` dátum + 1 naptól *a mai napig*.
 |===
 
+== Működés `--update` nélkül
 
+* Ha a szubreddit név már szerepel a `visited.txt`-ben, a script jelzi:  
+  `Already processed <subreddit>`, és *nem* tölti le újra.
+* Ha még nem szerepel:
+** végigmegy a `new` feeden *a jelenlegi időpontig*,
+** kiírja a complet TXT fájlt `<outdir>/<subreddit>.txt` néven,
+** a végén a fejléc `visited: <mai dátum>` értékre frissül,
+** a szubreddit neve bekerül a `visited.txt`-be.
 
-. **Gyors próba:**
-+
+== Működés `--update` módban
+
+Minden szubredditre:
+
+* megkeresi a megfelelő TXT fájlt (`<outdir>/<subreddit>.txt`),
+* kiolvassa az első sorból a korábbi `visited` dátumot (ha nincs, vagy hibás, akkor **full download**),
+* kiszámítja: `after = visited + 1 nap 00:00 (local)`,
+* letölti az új posztokat `after` és "most" közötti időszakra, és:
+** ha a fájl már létezett és értelmezhető `visited` volt → *append* módban folytatja a fájl végét,
+** ha a fájl hiányzik vagy nincs értelmezhető `visited` → teljes újra-letöltést csinál a teljes időszakra (full download),
+* a végén frissíti a fejlécet `visited: <mai dátum>` értékre.
+
+Ha a korábbi `visited` dátum valamiért *a jövőben van* a mai naphoz képest, a script ezt jelzi és **nem** nyúl a fájlhoz.
+
+== Szubredditek fájlból (`--inputfile`)
+
+`load_subreddits_from_file(path)`:
+
+* soronként olvas neveket,
+* a `#`-tel kezdődő sorokat és az üreseket kihagyja,
+* az opcionális `r/` előtagot levágja,
+* a duplikátumokat kiszűri,
+* üres eredmény esetén `RuntimeError`-ral leáll.
+
+== Példa futtatások (`main.py`)
+
+=== Teljes letöltés két szubredditről TXT-be
 ----
-python3 main.py RealHungary --plain --out /te/saját/könyvtárad
-----
-
-== Példák
-
-=== NDJSON letöltés két szubredditről
-----
-python3 main.py RealHungary hikingHungary --out /te/saját/könyvtárad
+python main.py RealHungary hikingHungary --out "D:\RedditTXT"
 ----
 
 === TXT kimenet, 100 posztig, kommentek nélkül
 ----
-python3 main.py budapest --plain --limit 100 --no-comments
+python main.py budapest --limit 100 --no-comments --out "D:\RedditTXT"
 ----
 
-=== Időablak: 2024-01-01 – 2024-03-31 (UTC)
-----
-python3 main.py hungary --after 2024-01-01 --before 2024-03-31
-----
-
-=== Szubredditek fájlból (duplikátumok kiszűrve)
+=== Szubredditek fájlból, update módban
 `subs.txt`:
 ----
 # magyar városok
@@ -160,21 +196,50 @@ szeged
 ----
 Futtatás:
 ----
-python3 main.py --inputfile subs.txt --plain
+python main.py --inputfile subs.txt --update --out "D:\reddit"
 ----
 
-== Kimeneti struktúra (példa)
+=== Csak hitelesítés tesztelése
+----
+python main.py --auth-test
+----
 
+== `datumcsere.py` – dátumcsere meglévő TXT-kben
 
-== Hibaelhárítás
+`datumcsere.py` egy külön, kis segédscript, amely *meglévő TXT fájlok* első sorában keresi az alábbi mintát:
 
-[cols="2,5",options="header"]
-|===
-|Tünet | Teendő
+----
+=== r/szubreddit === visited: YYYY.MM.DD
+----
 
-|`Authentication error` | Ellenőrizd a `.env`-et; van-e `REDDIT_CLIENT_ID/SECRET/USER_AGENT`. A USERNAME/PASSWORD itt nem szükséges.
-|Üres kimenet | Lehet, hogy a szubreddit létezik de üres
-|429 / rate limit | Növeld a `--sleep` értékét (pl. 1.5–2.0)
-|Unicode gond TXT-ben | A fájlok UTF-8-ban íródnak; a megjelenítést állítsd UTF-8-ra.
-|===
+és a dátumot lecseréli a **mai napra** (helyi dátum, `YYYY.MM.DD` formátum).
+
+=== Hogyan működik?
+
+* rekurzívan bejár egy mappát (`os.walk`),
+* minden `.txt` fájlra:
+** elolvassa az első sort,
+** ha illeszkedik a fenti regexre, akkor a dátumot lecseréli `today_str`-re,
+** a teljes fájlt visszaírja ugyanabba a helyre.
+* a kimenetben minden fájlról ír:
+** sikeres esetben:  
+   `feldolgozás: <path> dátum cserélve a maira (YYYY.MM.DD)`
+** ha a minta nem található:  
+   `feldolgozás: <path> sikertelen nem találtam meg a megfelelő sort`
+
+=== Használat
+
+Alapértelmezett mappa az aktuális könyvtár:
+
+----
+python datumcsere.py
+----
+
+Vagy megadhatsz explicit mappát (pl. ahová a `main.py` írta a TXT-ket):
+
+----
+python datumcsere.py "D:\reddit"
+----
+
+**Fontos:** ez az eszköz *csak a dátumot cseréli*, a többi tartalmat érintetlenül hagyja. Elsősorban *debug* és manuális korrekció céljára készült, éles folyamatban használd körültekintéssel.
 
